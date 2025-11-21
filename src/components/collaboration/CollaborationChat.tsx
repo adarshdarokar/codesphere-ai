@@ -9,7 +9,7 @@ import { toast } from 'sonner';
 import { MembersList } from './MembersList';
 
 /* ============================
-   💠 Interfaces
+   Interfaces
 ============================ */
 
 export interface Collaboration {
@@ -39,7 +39,7 @@ interface CollaborationChatProps {
 }
 
 /* ============================
-   💠 Component
+   Component
 ============================ */
 
 export const CollaborationChat = ({ collaboration }: CollaborationChatProps) => {
@@ -49,10 +49,7 @@ export const CollaborationChat = ({ collaboration }: CollaborationChatProps) => 
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  /* ============================
-     Fetch + Subscribe
-  ============================ */
-
+  /* Load + Subscribe */
   useEffect(() => {
     fetchMessages();
     const cleanup = subscribeToMessages();
@@ -63,10 +60,7 @@ export const CollaborationChat = ({ collaboration }: CollaborationChatProps) => 
     scrollToBottom();
   }, [messages]);
 
-  /* ============================
-     Load initial messages
-  ============================ */
-
+  /* Fetch initial messages */
   const fetchMessages = async () => {
     try {
       const { data, error } = await supabase
@@ -89,7 +83,7 @@ export const CollaborationChat = ({ collaboration }: CollaborationChatProps) => 
 
         const finalMessages = data.map((msg) => ({
           ...msg,
-          profiles: profileMap.get(msg.user_id),
+          profiles: profileMap.get(msg.user_id) ?? null,
         }));
 
         setMessages(finalMessages);
@@ -97,15 +91,12 @@ export const CollaborationChat = ({ collaboration }: CollaborationChatProps) => 
         setMessages([]);
       }
     } catch (error) {
+      console.error(error);
       toast.error('Failed to load messages');
-      console.error('Error fetching messages:', error);
     }
   };
 
-  /* ============================
-     Real-time listener
-  ============================ */
-
+  /* Real-time listener */
   const subscribeToMessages = () => {
     const channel = supabase
       .channel(`collaboration:${collaboration.id}`)
@@ -118,16 +109,19 @@ export const CollaborationChat = ({ collaboration }: CollaborationChatProps) => 
           filter: `collaboration_id=eq.${collaboration.id}`,
         },
         async (payload) => {
-          const { data: profile } = await supabase
-            .from('profiles')
-            .select('full_name, email')
-            .eq('id', payload.new.user_id)
-            .single();
+          let profile = null;
 
-          setMessages((prev) => [
-            ...prev,
-            { ...(payload.new as Message), profiles: profile },
-          ]);
+          if (payload.new.user_id !== 'ai') {
+            const { data } = await supabase
+              .from('profiles')
+              .select('full_name, email')
+              .eq('id', payload.new.user_id)
+              .single();
+
+            profile = data;
+          }
+
+          setMessages((prev) => [...prev, { ...(payload.new as Message), profiles: profile }]);
         }
       )
       .subscribe();
@@ -135,184 +129,161 @@ export const CollaborationChat = ({ collaboration }: CollaborationChatProps) => 
     return () => supabase.removeChannel(channel);
   };
 
-  /* ============================
-     Auto-scroll
-  ============================ */
-
+  /* Scroll to bottom */
   const scrollToBottom = () => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   };
 
-  /* ============================
-     Send message
-  ============================ */
-
+  /* Save message to Supabase */
   const sendMessage = async (content: string, isAi: boolean = false) => {
-    if (!user || !content.trim()) return;
+    if (!content.trim()) return;
 
     try {
       const { error } = await supabase.from('collaboration_messages').insert({
         collaboration_id: collaboration.id,
-        user_id: user.id,
+        user_id: isAi ? "ai" : user?.id,  // 🔥 FIXED HERE
         content: content.trim(),
         is_ai: isAi,
       });
 
       if (error) throw error;
     } catch (error) {
+      console.error(error);
       toast.error('Failed to send message');
-      console.error('Error sending message:', error);
     }
   };
 
-  /* ============================
-     Handle Send Button
-  ============================ */
-
+  /* Handle send AI/User msg */
   const handleSendMessage = async () => {
     if (!input.trim() || loading) return;
 
     const userMessage = input;
     setInput('');
 
-    // 🧠 AI message: starts with "@ai"
+    // Save user message
+    await sendMessage(userMessage, false);
+
+    // AI trigger
     if (userMessage.trim().toLowerCase().startsWith('@ai')) {
       setLoading(true);
 
       const aiPrompt = userMessage.slice(3).trim();
-      await sendMessage(userMessage);
 
       try {
         const response = await fetch(
           `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/collaboration-ai`,
           {
             method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
-            },
-            body: JSON.stringify({
-              message: aiPrompt,
-              collaborationId: collaboration.id,
-            }),
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: aiPrompt, collaborationId: collaboration.id }),
           }
         );
 
-        if (!response.ok) throw new Error('AI request failed');
+        if (!response.ok) throw new Error("AI request failed");
 
-        const reader = response.body?.getReader();
-        if (!reader) throw new Error('No reader available');
-
-        let aiResponse = '';
         const aiMessageId = crypto.randomUUID();
+        let aiText = '';
 
-        // Add placeholder AI message
+        // Placeholder AI bubble
         setMessages((prev) => [
           ...prev,
           {
             id: aiMessageId,
             content: '',
-            user_id: user!.id,
+            user_id: 'ai',
             is_ai: true,
             created_at: new Date().toISOString(),
+            profiles: null,
           },
         ]);
 
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error("No reader");
+
         const decoder = new TextDecoder();
 
-        // Streaming loop
+        // Stream loop
         while (true) {
-          const { done, value } = await reader.read();
+          const { value, done } = await reader.read();
           if (done) break;
 
           const chunk = decoder.decode(value);
           const lines = chunk.split('\n');
 
           for (const line of lines) {
-            if (line.startsWith('data: ')) {
+            if (!line.trim()) continue;
+
+            if (line.startsWith("data: ")) {
               const data = line.slice(6);
-              if (data === '[DONE]') continue;
+              if (data === "[DONE]") continue;
 
               try {
                 const parsed = JSON.parse(data);
-
                 if (parsed.choices?.[0]?.delta?.content) {
-                  aiResponse += parsed.choices[0].delta.content;
-
-                  setMessages((prev) =>
-                    prev.map((msg) =>
-                      msg.id === aiMessageId
-                        ? { ...msg, content: aiResponse }
-                        : msg
-                    )
-                  );
+                  aiText += parsed.choices[0].delta.content;
                 }
-              } catch (e) {
-                console.error('Error parsing chunk:', e);
+              } catch {
+                aiText += data;
               }
+
+              // Update bubble
+              setMessages((prev) =>
+                prev.map((m) => (m.id === aiMessageId ? { ...m, content: aiText } : m))
+              );
             }
           }
         }
 
         // Save final AI message
-        if (aiResponse) {
-          await sendMessage(aiResponse, true);
+        if (aiText.trim()) {
+          await sendMessage(aiText, true);
         }
-      } catch (error) {
-        toast.error('AI assistant is unavailable');
-        console.error('Error calling AI:', error);
+      } catch (err) {
+        console.error(err);
+        toast.error("AI assistant unavailable");
       } finally {
         setLoading(false);
       }
-    } else {
-      await sendMessage(userMessage);
     }
   };
 
-  /* ============================
-     Enter key handler
-  ============================ */
-
+  /* Enter key handler */
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      handleSendMessage()
+      handleSendMessage();
     }
   };
 
-  /* ============================
-     JSX UI
-  ============================ */
-
+  /* UI */
   return (
     <div className="flex h-full">
       <div className="flex flex-col flex-1">
+
         {/* Header */}
-        <div className="border-b border-border p-4 bg-muted/30">
+        <div className="border-b border-border p-4 bg-muted/50 backdrop-blur-sm shadow-sm">
           <h2 className="text-xl font-semibold">{collaboration.name}</h2>
           {collaboration.description && (
-            <p className="text-sm mt-1 text-muted-foreground">
-              {collaboration.description}
-            </p>
+            <p className="text-sm mt-1 text-muted-foreground">{collaboration.description}</p>
           )}
         </div>
 
         {/* Messages */}
         <ScrollArea className="flex-1 p-4" ref={scrollRef}>
           <div className="space-y-4">
-            {messages.map((message) => {
-              const isSelf = message.user_id === user?.id;
+            {messages.map((m) => {
+              const isSelf = m.user_id === user?.id;
+              const isAI = m.user_id === "ai";
 
               return (
-                <div
-                  key={message.id}
-                  className={`flex gap-3 ${isSelf ? 'justify-end' : 'justify-start'}`}
-                >
+                <div key={m.id} className={`flex gap-3 ${isSelf ? "justify-end" : "justify-start"}`}>
+
+                  {/* Avatar LEFT */}
                   {!isSelf && (
-                    <div className="flex-shrink-0">
-                      {message.is_ai ? (
+                    <div className="flex-shrink-0 mt-auto">
+                      {isAI ? (
                         <div className="h-8 w-8 rounded-full bg-primary flex items-center justify-center">
                           <Bot className="h-5 w-5 text-primary-foreground" />
                         </div>
@@ -324,28 +295,29 @@ export const CollaborationChat = ({ collaboration }: CollaborationChatProps) => 
                     </div>
                   )}
 
+                  {/* Bubble */}
                   <div
-                    className={`max-w-[70%] rounded-lg px-4 py-2 ${
-                      isSelf
-                        ? 'bg-primary text-primary-foreground'
-                        : message.is_ai
-                        ? 'bg-muted border border-border'
-                        : 'bg-secondary text-secondary-foreground'
-                    }`}
+                    className={`max-w-[70%] px-4 py-2 rounded-2xl shadow-sm
+                      ${
+                        isSelf
+                          ? "bg-primary text-primary-foreground rounded-br-none"
+                          : isAI
+                          ? "bg-muted text-foreground border border-border rounded-bl-none"
+                          : "bg-secondary text-secondary-foreground rounded-bl-none"
+                      }
+                    `}
                   >
-                    {!isSelf && !message.is_ai && (
+                    {!isSelf && !isAI && (
                       <div className="text-xs mb-1 opacity-70 font-medium">
-                        {message.profiles?.full_name || message.profiles?.email}
+                        {m.profiles?.full_name || m.profiles?.email}
                       </div>
                     )}
-
-                    <p className="text-sm whitespace-pre-wrap">
-                      {message.content}
-                    </p>
+                    <p className="text-sm whitespace-pre-wrap">{m.content}</p>
                   </div>
 
+                  {/* Avatar RIGHT */}
                   {isSelf && (
-                    <div className="flex-shrink-0">
+                    <div className="flex-shrink-0 mt-auto">
                       <div className="h-8 w-8 rounded-full bg-primary flex items-center justify-center">
                         <UserCircle className="h-5 w-5 text-primary-foreground" />
                       </div>
@@ -358,22 +330,22 @@ export const CollaborationChat = ({ collaboration }: CollaborationChatProps) => 
         </ScrollArea>
 
         {/* Input */}
-        <div className="border-t border-border p-4 bg-muted/30">
+        <div className="border-t border-border p-4 bg-muted/40 backdrop-blur-sm">
           <div className="flex gap-2">
             <Textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Type a message... (Use @ai to talk to AI, Shift+Enter for new line)"
-              className="min-h-[60px] max-h-[200px]"
+              placeholder="Type a message... (Use @ai)"
+              className="min-h-[60px] max-h-[200px] rounded-xl border-muted shadow-sm"
               disabled={loading}
             />
 
             <Button
               onClick={handleSendMessage}
-              disabled={!input.trim() || loading}
               size="icon"
-              className="h-[60px] w-[60px]"
+              disabled={!input.trim() || loading}
+              className="h-[60px] w-[60px] rounded-xl shadow-md active:scale-95 transition"
             >
               <Send className="h-5 w-5" />
             </Button>
@@ -381,10 +353,7 @@ export const CollaborationChat = ({ collaboration }: CollaborationChatProps) => 
         </div>
       </div>
 
-      <MembersList
-        collaborationId={collaboration.id}
-        creatorId={collaboration.creator_id}
-      />
+      <MembersList collaborationId={collaboration.id} creatorId={collaboration.creator_id} />
     </div>
   );
 };
