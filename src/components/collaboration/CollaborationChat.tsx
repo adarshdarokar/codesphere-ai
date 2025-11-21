@@ -71,7 +71,7 @@ export const CollaborationChat = ({ collaboration }: CollaborationChatProps) => 
 
       if (error) throw error;
 
-      if (data && data.length > 0) {
+      if (data?.length) {
         const userIds = [...new Set(data.map((m) => m.user_id))];
 
         const { data: profiles } = await supabase
@@ -79,20 +79,17 @@ export const CollaborationChat = ({ collaboration }: CollaborationChatProps) => 
           .select('id, full_name, email')
           .in('id', userIds);
 
-        const profileMap = new Map(profiles?.map((p) => [p.id, p]) || []);
-
-        const finalMessages = data.map((msg) => ({
+        const map = new Map(profiles?.map((p) => [p.id, p]));
+        const list = data.map((msg) => ({
           ...msg,
-          profiles: profileMap.get(msg.user_id) ?? null,
+          profiles: map.get(msg.user_id) ?? null,
         }));
 
-        setMessages(finalMessages);
-      } else {
-        setMessages([]);
-      }
-    } catch (error) {
-      console.error(error);
-      toast.error('Failed to load messages');
+        setMessages(list);
+      } else setMessages([]);
+    } catch (e) {
+      console.error(e);
+      toast.error("Failed to load messages");
     }
   };
 
@@ -118,7 +115,7 @@ export const CollaborationChat = ({ collaboration }: CollaborationChatProps) => 
               .eq('id', payload.new.user_id)
               .single();
 
-            profile = data;
+            profile = data || null;
           }
 
           setMessages((prev) => [...prev, { ...(payload.new as Message), profiles: profile }]);
@@ -129,70 +126,72 @@ export const CollaborationChat = ({ collaboration }: CollaborationChatProps) => 
     return () => supabase.removeChannel(channel);
   };
 
-  /* Scroll to bottom */
+  /* Scroll */
   const scrollToBottom = () => {
-    if (scrollRef.current) {
+    if (scrollRef.current)
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
   };
 
-  /* Save message to Supabase */
+  /* Save message */
   const sendMessage = async (content: string, isAi: boolean = false) => {
     if (!content.trim()) return;
 
     try {
-      const { error } = await supabase.from('collaboration_messages').insert({
+      await supabase.from('collaboration_messages').insert({
         collaboration_id: collaboration.id,
-        user_id: isAi ? "ai" : user?.id,  // 🔥 FIXED HERE
+        user_id: isAi ? "ai" : user?.id,
         content: content.trim(),
         is_ai: isAi,
       });
-
-      if (error) throw error;
-    } catch (error) {
-      console.error(error);
-      toast.error('Failed to send message');
+    } catch (e) {
+      console.error(e);
+      toast.error("Failed to send message");
     }
   };
 
-  /* Handle send AI/User msg */
+  /* Send handler */
   const handleSendMessage = async () => {
     if (!input.trim() || loading) return;
 
     const userMessage = input;
     setInput('');
 
-    // Save user message
-    await sendMessage(userMessage, false);
+    // SAVE USER MESSAGE
+    await sendMessage(userMessage);
 
-    // AI trigger
-    if (userMessage.trim().toLowerCase().startsWith('@ai')) {
+    // AI TRIGGER
+    if (userMessage.trim().toLowerCase().startsWith("@ai")) {
       setLoading(true);
 
-      const aiPrompt = userMessage.slice(3).trim();
+      const prompt = userMessage.slice(3).trim();
 
       try {
         const response = await fetch(
           `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/collaboration-ai`,
           {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: aiPrompt, collaborationId: collaboration.id }),
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+            },
+            body: JSON.stringify({
+              message: prompt,
+              collaborationId: collaboration.id,
+            }),
           }
         );
 
         if (!response.ok) throw new Error("AI request failed");
 
+        let aiText = "";
         const aiMessageId = crypto.randomUUID();
-        let aiText = '';
 
-        // Placeholder AI bubble
         setMessages((prev) => [
           ...prev,
           {
             id: aiMessageId,
-            content: '',
-            user_id: 'ai',
+            content: "",
+            user_id: "ai",
             is_ai: true,
             created_at: new Date().toISOString(),
             profiles: null,
@@ -200,57 +199,50 @@ export const CollaborationChat = ({ collaboration }: CollaborationChatProps) => 
         ]);
 
         const reader = response.body?.getReader();
-        if (!reader) throw new Error("No reader");
-
         const decoder = new TextDecoder();
 
-        // Stream loop
         while (true) {
-          const { value, done } = await reader.read();
+          const { value, done } = await reader!.read();
           if (done) break;
 
           const chunk = decoder.decode(value);
-          const lines = chunk.split('\n');
+          const lines = chunk.split("\n");
 
           for (const line of lines) {
-            if (!line.trim()) continue;
+            if (!line.startsWith("data: ")) continue;
 
-            if (line.startsWith("data: ")) {
-              const data = line.slice(6);
-              if (data === "[DONE]") continue;
+            const data = line.replace("data: ", "");
+            if (data === "[DONE]") continue;
 
-              try {
-                const parsed = JSON.parse(data);
-                if (parsed.choices?.[0]?.delta?.content) {
-                  aiText += parsed.choices[0].delta.content;
-                }
-              } catch {
-                aiText += data;
+            try {
+              const parsed = JSON.parse(data);
+              if (parsed.choices?.[0]?.delta?.content) {
+                aiText += parsed.choices[0].delta.content;
               }
-
-              // Update bubble
-              setMessages((prev) =>
-                prev.map((m) => (m.id === aiMessageId ? { ...m, content: aiText } : m))
-              );
+            } catch {
+              aiText += data;
             }
+
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === aiMessageId ? { ...m, content: aiText } : m
+              )
+            );
           }
         }
 
-        // Save final AI message
-        if (aiText.trim()) {
-          await sendMessage(aiText, true);
-        }
+        if (aiText.trim()) await sendMessage(aiText, true);
       } catch (err) {
         console.error(err);
-        toast.error("AI assistant unavailable");
+        toast.error("AI unavailable");
       } finally {
         setLoading(false);
       }
     }
   };
 
-  /* Enter key handler */
-  const handleKeyDown = (e: React.KeyboardEvent) => {
+  /* Enter */
+  const handleKeyDown = (e: any) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSendMessage();
@@ -263,10 +255,12 @@ export const CollaborationChat = ({ collaboration }: CollaborationChatProps) => 
       <div className="flex flex-col flex-1">
 
         {/* Header */}
-        <div className="border-b border-border p-4 bg-muted/50 backdrop-blur-sm shadow-sm">
+        <div className="border-b border-border p-4 bg-muted/40 backdrop-blur-md shadow-sm">
           <h2 className="text-xl font-semibold">{collaboration.name}</h2>
           {collaboration.description && (
-            <p className="text-sm mt-1 text-muted-foreground">{collaboration.description}</p>
+            <p className="text-sm mt-1 text-muted-foreground">
+              {collaboration.description}
+            </p>
           )}
         </div>
 
@@ -280,7 +274,6 @@ export const CollaborationChat = ({ collaboration }: CollaborationChatProps) => 
               return (
                 <div key={m.id} className={`flex gap-3 ${isSelf ? "justify-end" : "justify-start"}`}>
 
-                  {/* Avatar LEFT */}
                   {!isSelf && (
                     <div className="flex-shrink-0 mt-auto">
                       {isAI ? (
@@ -295,27 +288,25 @@ export const CollaborationChat = ({ collaboration }: CollaborationChatProps) => 
                     </div>
                   )}
 
-                  {/* Bubble */}
                   <div
                     className={`max-w-[70%] px-4 py-2 rounded-2xl shadow-sm
                       ${
                         isSelf
                           ? "bg-primary text-primary-foreground rounded-br-none"
                           : isAI
-                          ? "bg-muted text-foreground border border-border rounded-bl-none"
+                          ? "bg-muted border border-border text-foreground rounded-bl-none"
                           : "bg-secondary text-secondary-foreground rounded-bl-none"
-                      }
-                    `}
+                      }`}
                   >
                     {!isSelf && !isAI && (
                       <div className="text-xs mb-1 opacity-70 font-medium">
                         {m.profiles?.full_name || m.profiles?.email}
                       </div>
                     )}
+
                     <p className="text-sm whitespace-pre-wrap">{m.content}</p>
                   </div>
 
-                  {/* Avatar RIGHT */}
                   {isSelf && (
                     <div className="flex-shrink-0 mt-auto">
                       <div className="h-8 w-8 rounded-full bg-primary flex items-center justify-center">
@@ -330,13 +321,13 @@ export const CollaborationChat = ({ collaboration }: CollaborationChatProps) => 
         </ScrollArea>
 
         {/* Input */}
-        <div className="border-t border-border p-4 bg-muted/40 backdrop-blur-sm">
+        <div className="border-t border-border p-4 bg-muted/30 backdrop-blur-sm">
           <div className="flex gap-2">
             <Textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Type a message... (Use @ai)"
+              placeholder="Type a message... (Use @ai to talk to AI)"
               className="min-h-[60px] max-h-[200px] rounded-xl border-muted shadow-sm"
               disabled={loading}
             />
