@@ -278,7 +278,7 @@ export const CollaborationChat = ({ collaboration }: CollaborationChatProps) => 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      handleSendMessage();
+      handleSendMessage()
     }
   };
 
